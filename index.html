@@ -100,6 +100,18 @@ tbody tr:last-child td{border-bottom:none;}
 .banner.ok{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok);}
 .banner.warn{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn);}
 .banner.danger{background:var(--danger-soft);color:var(--danger);border:1px solid var(--danger);}
+.err-overview{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-top:14px;overflow:hidden;}
+.err-overview-head{display:flex;align-items:center;gap:6px;padding:10px 14px;font-size:12px;font-weight:600;color:var(--faint);border-bottom:1px solid var(--border2);}
+.err-overview-head .cnt{margin-left:auto;font-weight:600;color:var(--sub);background:var(--border2);border-radius:10px;padding:1px 9px;font-size:11px;}
+.err-card{border-bottom:1px solid var(--border2);}
+.err-card:last-child{border-bottom:none;}
+.err-card summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:9px 14px;font-size:13px;font-weight:600;color:var(--text);}
+.err-card summary::-webkit-details-marker{display:none;}
+.err-card summary::before{content:'▸';color:var(--faint);font-size:10px;flex:0 0 auto;transition:transform .15s;}
+.err-card[open] summary::before{transform:rotate(90deg);}
+.err-card summary .tag{font-weight:400;font-size:11px;color:var(--faint);}
+.err-card summary .cnt{margin-left:auto;background:var(--warn-soft);color:var(--warn);font-size:11px;font-weight:700;border-radius:10px;padding:1px 8px;}
+.err-card .body{padding:0 14px 12px 36px;font-size:12.5px;color:var(--sub);line-height:1.8;}
 .waiting-badge{display:inline-block;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:600;background:var(--accent-soft);color:var(--accent);}
 .case-header{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;}
 .case-header .title{font-size:16px;font-weight:700;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
@@ -417,6 +429,26 @@ function productErrorCount(pid){ return errors.filter(e=>e.kind==='product'&&e.r
 function packagingErrorCount(pid){ return errors.filter(e=>e.kind==='packaging'&&e.refId===pid).length; }
 function productErrors(pid){ return errors.filter(e=>e.kind==='product'&&e.refId===pid).slice().reverse(); }
 function packagingErrors(pid){ return errors.filter(e=>e.kind==='packaging'&&e.refId===pid).slice().reverse(); }
+
+/* 全部商品／底卡曾經發生過的錯誤總覽（不限目前製作的商品，做為每次確認時的通用提醒） */
+function allErrorsOverviewHTML(){
+  if(!errors.length) return '';
+  let cards = ''; let n = 0;
+  products.forEach(p=>{
+    const list = productErrors(p.id);
+    if(!list.length) return; n++;
+    cards += `<details class="err-card"><summary>● ${esc(p.name)} <span class="tag">商品</span><span class="cnt">${list.length}</span></summary>
+      <div class="body">${list.map((e,idx)=>`${String(idx+1).padStart(2,'0')}.${esc(e.content)}`).join('<br>')}</div></details>`;
+  });
+  packagings.forEach(p=>{
+    const list = packagingErrors(p.id);
+    if(!list.length) return; n++;
+    cards += `<details class="err-card"><summary>● ${esc(p.name)} <span class="tag">底卡／包裝</span><span class="cnt">${list.length}</span></summary>
+      <div class="body">${list.map((e,idx)=>`${String(idx+1).padStart(2,'0')}.${esc(e.content)}`).join('<br>')}</div></details>`;
+  });
+  if(!n) return '';
+  return `<div class="err-overview"><div class="err-overview-head">📋 全部商品／底卡歷史錯誤（點項目展開，供本次製作提醒參考）<span class="cnt">${n} 項</span></div>${cards}</div>`;
+}
 
 /* ================= 款式整體狀態 ================= */
 function productProgress(s){
@@ -1153,6 +1185,7 @@ function viewStyleDetail(oid, cpid, sid, tab){
   if(tab==='product'){
     const hist = productErrors(cp.productId);
     if(hist.length) html += `<div class="banner warn">⚠ 此商品過去發生過的問題：<br>${hist.map(e=>'・'+formatDate(e.date)+'（'+kindLabel(e.stage||'')+'）'+esc(e.content)).join('<br>')}</div>`;
+    html += allErrorsOverviewHTML();
     const p = ensureProduct(s);
     KINDS.forEach(k=>{
       html += `<div class="product-block"><h4>${k.label} <button class="btn small secondary" onclick="addRound('${oid}','${cpid}','${sid}','${k.key}')">＋ 新增一輪${k.label}</button></h4>`;
@@ -1177,6 +1210,7 @@ function viewStyleDetail(oid, cpid, sid, tab){
     if(!pkg){ html += '<div class="panel"><div class="empty">此款式尚未指定包裝／底卡</div></div>'; return html; }
     const hist = packagingErrors(pkg.id);
     if(hist.length) html += `<div class="banner warn">⚠ 此包裝過去發生過的問題：<br>${hist.map(e=>'・'+formatDate(e.date)+' '+esc(e.content)).join('<br>')}</div>`;
+    html += allErrorsOverviewHTML();
     const pc = s.packagingCheck;
     html += '<div class="section-title">製作時需要注意的點</div><div class="panel detail-block">';
     if(pc.items.length===0) html += '<div class="empty">尚未設定注意事項</div>';
@@ -1249,6 +1283,7 @@ function viewRound(oid,cpid,sid,kind,idx){
   const hist = productErrors(cp.productId);
   let html = '';
   if(hist.length) html += `<div class="banner warn">⚠ 此商品過去發生過的問題：<br>${hist.map(e=>'・'+formatDate(e.date)+'（'+kindLabel(e.stage||'')+'）'+esc(e.content)).join('<br>')}</div>`;
+  html += allErrorsOverviewHTML();
   html += `<div class="section-title">${kindLabel(kind)} 第${idx+1}輪 · 檢查清單</div><div class="panel detail-block">`;
   if(r.items.length===0) html += '<div class="empty">尚未設定注意事項，請在下方新增</div>';
   r.items.forEach((it,i)=>{

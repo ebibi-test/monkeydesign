@@ -39,6 +39,14 @@ a{color:var(--accent);text-decoration:none;cursor:pointer;}
 .month-filter{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
 .month-filter select{padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13.5px;font-family:inherit;background:var(--surface);color:var(--text);font-weight:600;}
 .month-filter .mf-count{font-size:12px;color:var(--faint);}
+.pagination-bar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:14px;}
+.pg-info{font-size:12.5px;color:var(--sub);}
+.pg-controls{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
+.pg-controls .btn{min-width:34px;justify-content:center;padding:6px 10px;}
+.pg-controls .btn:disabled{opacity:.4;cursor:not-allowed;}
+.pg-ellipsis{padding:0 4px;color:var(--faint);font-size:12.5px;}
+.filter-bar{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:12px;}
+.filter-bar .field{min-width:130px;}
 .mf-arrow{width:26px;height:26px;line-height:1;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;font-family:inherit;}
 .mf-arrow:hover:not(:disabled){background:var(--border2);}
 .mf-arrow:disabled{color:var(--faint);cursor:not-allowed;opacity:.5;}
@@ -239,6 +247,48 @@ function daysBetween(fromStr, toStr){
   return Math.round((b-a)/86400000);
 }
 function daysUntilDue(dateStr){ return dateStr ? daysBetween(todayStr(), dateStr) : null; }
+function sameDay(a,b){ return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
+function createdDateOnly(o){ return o.createdAt ? o.createdAt.slice(0,10) : ''; }
+function dateRangeMatches(range, dateStr){
+  if(!range || range.type==='all') return true;
+  const d = parseDateOnly(dateStr); if(!d) return false;
+  const now = new Date(); now.setHours(0,0,0,0);
+  const day = 86400000;
+  if(range.type==='today') return sameDay(d, now);
+  if(range.type==='yesterday'){ const y=new Date(now.getTime()-day); return sameDay(d,y); }
+  if(range.type==='week'){ const dow=(now.getDay()+6)%7; const monday=new Date(now.getTime()-dow*day); return d>=monday && d<=now; }
+  if(range.type==='month'){ return d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth(); }
+  if(range.type==='lastMonth'){ const lm=new Date(now.getFullYear(), now.getMonth()-1, 1); return d.getFullYear()===lm.getFullYear() && d.getMonth()===lm.getMonth(); }
+  if(range.type==='last30'){ const from=new Date(now.getTime()-29*day); return d>=from && d<=now; }
+  if(range.type==='custom'){
+    const from=parseDateOnly(range.from), to=parseDateOnly(range.to);
+    if(!from && !to) return true;
+    if(from && d<from) return false;
+    if(to && d>to) return false;
+    return true;
+  }
+  return true;
+}
+function sortOrders(list, key){
+  const arr = list.slice();
+  if(key==='createdAsc') arr.sort((a,b)=> (a.createdAt||'').localeCompare(b.createdAt||''));
+  else if(key==='dueAsc') arr.sort((a,b)=> (a.dueDate||'9999-99-99').localeCompare(b.dueDate||'9999-99-99'));
+  else if(key==='dueDesc') arr.sort((a,b)=> (b.dueDate||'').localeCompare(a.dueDate||''));
+  else if(key==='no') arr.sort((a,b)=> (a.no||'').localeCompare(b.no||''));
+  else arr.sort((a,b)=> (b.createdAt||'').localeCompare(a.createdAt||''));
+  return arr;
+}
+function paginationButtons(total, current){
+  const pages=[];
+  if(total<=7){ for(let i=1;i<=total;i++) pages.push(i); return pages; }
+  pages.push(1);
+  if(current>3) pages.push('...');
+  const start=Math.max(2,current-1), end=Math.min(total-1,current+1);
+  for(let i=start;i<=end;i++) pages.push(i);
+  if(current<total-2) pages.push('...');
+  pages.push(total);
+  return pages;
+}
 // 一般日期顯示：同一年只顯示「月日」，跨年才加上年份（常見的中文網站慣例）
 function formatDate(dateStr){
   const d = parseDateOnly(dateStr);
@@ -534,6 +584,7 @@ fbAuth.onAuthStateChanged(async (user)=>{
       if(data && Array.isArray(data.products) && Array.isArray(data.orders)){
         products=data.products; packagings=data.packagings||[]; orders=data.orders; errors=data.errors||[]; seq=data.seq||100;
         fieldHistory=data.fieldHistory||{};
+        migrateOrders();
       }
     } else {
       await fbDocRef.set({products, packagings, orders, errors, seq, fieldHistory, updatedAt:new Date().toISOString()});
@@ -567,8 +618,17 @@ function loadState(){
     return true;
   }catch(e){ return false; }
 }
+function migrateOrders(){
+  orders.forEach(o=>{
+    if(!o.createdAt){
+      if(o.month) o.createdAt = o.month+'-01T00:00:00.000Z';
+      else if(o.dueDate) o.createdAt = o.dueDate+'T00:00:00.000Z';
+      else o.createdAt = nowISO();
+    }
+  });
+}
 function initApp(){
-  loadState(); render(); // 先用本機快取立即畫面，避免空白
+  loadState(); migrateOrders(); render(); // 先用本機快取立即畫面，避免空白
   setSyncBadge('localonly'); updateAuthUI(); // 實際狀態由 onAuthStateChanged 接手更新
 }
 function exportData(){
@@ -582,7 +642,7 @@ function importData(){
       const d = JSON.parse(r.result);
       if(!Array.isArray(d.products)||!Array.isArray(d.orders)) throw 0;
       if(!confirm('匯入會覆蓋目前資料，確定？')) return;
-      products=d.products; packagings=d.packagings||[]; orders=d.orders; errors=d.errors||[]; seq=d.seq||100; fieldHistory=d.fieldHistory||{}; render();
+      products=d.products; packagings=d.packagings||[]; orders=d.orders; errors=d.errors||[]; seq=d.seq||100; fieldHistory=d.fieldHistory||{}; migrateOrders(); render();
     }catch(e){ alert('檔案格式不正確'); }
   }; r.readAsText(i.files[0]); }; i.click();
 }
@@ -686,32 +746,130 @@ function dashSection(title, list){
 /* ================= 案件管理（列表） ================= */
 let orderSearch = '';
 let orderMonthFilter = 'all';
-function setOrderMonthFilter(v){ orderMonthFilter = v; render(); }
+let orderDateRangeType = 'all';
+let orderDateFrom = '';
+let orderDateTo = '';
+let orderStatusFilter = 'all';
+let orderSortKey = 'createdDesc';
+let orderPage = 1;
+let orderPageSize = 50;
+const ORDER_STATUS_OPTIONS = [
+  {value:'all', label:'全部狀態'},
+  {value:'st-pending', label:'尚未加入商品'},
+  {value:'st-progress', label:'進行中'},
+  {value:'st-danger', label:'需留意'},
+  {value:'st-done', label:'已完成'}
+];
+const ORDER_DATE_OPTIONS = [
+  {value:'all', label:'不限日期'},
+  {value:'today', label:'今天'},
+  {value:'yesterday', label:'昨天'},
+  {value:'week', label:'本週'},
+  {value:'month', label:'本月'},
+  {value:'lastMonth', label:'上個月'},
+  {value:'last30', label:'近30天'},
+  {value:'custom', label:'自訂日期'}
+];
+const ORDER_SORT_OPTIONS = [
+  {value:'createdDesc', label:'最近建立'},
+  {value:'createdAsc', label:'最早建立'},
+  {value:'dueAsc', label:'交期近到遠'},
+  {value:'dueDesc', label:'交期遠到近'},
+  {value:'no', label:'案件編號'}
+];
+function setOrderMonthFilter(v){ orderMonthFilter = v; orderPage=1; render(); }
+function setOrderDateRange(v){ orderDateRangeType=v; if(v!=='custom'){ orderDateFrom=''; orderDateTo=''; } orderPage=1; render(); }
+function applyOrderDateCustom(){
+  const from = document.getElementById('orderDateFrom').value;
+  const to = document.getElementById('orderDateTo').value;
+  orderDateRangeType='custom'; orderDateFrom=from; orderDateTo=to; orderPage=1; render();
+}
+function setOrderStatusFilter(v){ orderStatusFilter=v; orderPage=1; render(); }
+function setOrderSort(v){ orderSortKey=v; render(); }
+function setOrderPageSize(v){ orderPageSize=parseInt(v,10)||50; orderPage=1; render(); }
+function goOrderPage(p){ orderPage=p; render(); window.scrollTo(0,0); }
 function viewOrders(){
-  let html = `<div class="toolbar">
-    <input type="text" class="search-input" placeholder="搜尋案件編號／名稱／客戶／負責人" value="${esc(orderSearch)}" oninput="orderSearch=this.value;render();keepFocus()">
-    <button class="btn" onclick="newOrder()">＋ 新增案件</button></div>`;
   const q = orderSearch.trim().toLowerCase();
-  const rows = q ? orders.filter(o=>[o.no,o.name,o.customerName,o.owner].some(v=>(v||'').toLowerCase().includes(q))) : orders;
-  if(rows.length===0){ html += '<div class="panel"><div class="empty">目前沒有符合條件的案件</div></div>'; return html; }
-  const groups = {};
-  rows.forEach(o=>{ const m = orderMonth(o); (groups[m] = groups[m]||[]).push(o); });
-  const months = Object.keys(groups).sort((a,b)=> b.localeCompare(a));
-  if(!months.includes(orderMonthFilter)) orderMonthFilter = 'all';
-  const counts = {}; months.forEach(m=> counts[m]=groups[m].length);
-  html += monthFilterHtml(months, counts, orderMonthFilter, rows.length, 'setOrderMonthFilter');
-  const showMonths = orderMonthFilter==='all' ? months : [orderMonthFilter];
-  showMonths.forEach(m=>{
-    html += `<div class="dash-section"><div class="sec-title">${esc(monthLabel(m))} <span class="count">${groups[m].length} 件</span></div>
-    <div class="panel"><div class="tablewrap"><table><thead><tr><th>案件編號</th><th>客戶</th><th>案件名稱</th><th>商品／款式</th><th>負責人</th><th>整體狀態</th><th>交期</th></tr></thead><tbody>`;
-    groups[m].forEach(o=>{
-      const s = orderOverallStatus(o);
-      html += `<tr onclick="nav('order-detail',{id:'${o.id}',tab:'overview'})">
-        <td>${esc(o.no)}</td><td>${esc(o.customerName||'-')}</td><td>${esc(o.name)}</td><td>${esc(styleCountLabel(o))}</td>
-        <td>${esc(o.owner||'-')}</td><td><span class="status ${s.cls}">${s.label}</span></td><td>${formatDueDate(o.dueDate)}</td></tr>`;
-    });
-    html += '</tbody></table></div></div></div>';
+  let searchedRows = orders.filter(o=>{
+    if(!q) return true;
+    if([o.no,o.name,o.customerName,o.owner].some(v=>(v||'').toLowerCase().includes(q))) return true;
+    return o.products.some(cp=> (cp.name||'').toLowerCase().includes(q) || cp.styles.some(s=>(s.name||'').toLowerCase().includes(q)));
   });
+  const groups = {};
+  searchedRows.forEach(o=>{ const m=orderMonth(o); (groups[m]=groups[m]||[]).push(o); });
+  const months = Object.keys(groups).sort((a,b)=> b.localeCompare(a));
+  if(!months.includes(orderMonthFilter)) orderMonthFilter='all';
+  let rows = orderMonthFilter!=='all' ? searchedRows.filter(o=> orderMonth(o)===orderMonthFilter) : searchedRows;
+  const range = orderDateRangeType==='custom' ? {type:'custom', from:orderDateFrom, to:orderDateTo} : {type:orderDateRangeType};
+  rows = rows.filter(o=> dateRangeMatches(range, createdDateOnly(o)));
+  const statusCache = new Map();
+  const getStatus = o=>{ if(!statusCache.has(o.id)) statusCache.set(o.id, orderOverallStatus(o)); return statusCache.get(o.id); };
+  if(orderStatusFilter!=='all') rows = rows.filter(o=> getStatus(o).cls===orderStatusFilter);
+  const totalCount = rows.length;
+  rows = sortOrders(rows, orderSortKey);
+  const pageSize = orderPageSize;
+  const totalPages = Math.max(1, Math.ceil(totalCount/pageSize));
+  if(orderPage>totalPages) orderPage = totalPages;
+  if(orderPage<1) orderPage = 1;
+  const startIdx = (orderPage-1)*pageSize;
+  const pageRows = rows.slice(startIdx, startIdx+pageSize);
+
+  let html = `<div class="toolbar">
+    <input type="text" class="search-input" placeholder="搜尋案件編號／客戶／商品／款式" value="${esc(orderSearch)}" oninput="orderSearch=this.value;orderPage=1;render();keepFocus()">
+    <button class="btn" onclick="newOrder()">＋ 新增案件</button></div>`;
+
+  html += `<div class="filter-bar">
+    <div class="field"><label>日期</label>
+      <select onchange="setOrderDateRange(this.value)">
+        ${ORDER_DATE_OPTIONS.map(o=>`<option value="${o.value}" ${orderDateRangeType===o.value?'selected':''}>${o.label}</option>`).join('')}
+      </select>
+    </div>
+    ${orderDateRangeType==='custom' ? `
+    <div class="field"><label>開始日期</label><input type="date" id="orderDateFrom" value="${esc(orderDateFrom)}"></div>
+    <div class="field"><label>結束日期</label><input type="date" id="orderDateTo" value="${esc(orderDateTo)}"></div>
+    <div class="field" style="min-width:auto"><label style="visibility:hidden">.</label><button class="btn small secondary" onclick="applyOrderDateCustom()">套用</button></div>
+    ` : ''}
+    <div class="field"><label>狀態</label>
+      <select onchange="setOrderStatusFilter(this.value)">
+        ${ORDER_STATUS_OPTIONS.map(o=>`<option value="${o.value}" ${orderStatusFilter===o.value?'selected':''}>${o.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>排序</label>
+      <select onchange="setOrderSort(this.value)">
+        ${ORDER_SORT_OPTIONS.map(o=>`<option value="${o.value}" ${orderSortKey===o.value?'selected':''}>${o.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>每頁筆數</label>
+      <select onchange="setOrderPageSize(this.value)">
+        ${[20,50,100].map(n=>`<option value="${n}" ${orderPageSize===n?'selected':''}>${n} 筆</option>`).join('')}
+      </select>
+    </div>
+  </div>`;
+
+  const counts = {}; months.forEach(m=> counts[m]=groups[m].length);
+  html += `<div style="margin-bottom:8px;font-size:12px;color:var(--faint)">快速篩選（所屬月份）</div>`;
+  html += monthFilterHtml(months, counts, orderMonthFilter, searchedRows.length, 'setOrderMonthFilter');
+
+  if(totalCount===0){ html += '<div class="panel"><div class="empty">找不到符合條件的案件</div></div>'; return html; }
+
+  html += '<div class="panel"><div class="tablewrap"><table><thead><tr><th>案件編號</th><th>客戶</th><th>案件名稱</th><th>商品／款式</th><th>負責人</th><th>整體狀態</th><th>交期</th></tr></thead><tbody>';
+  pageRows.forEach(o=>{
+    const s = getStatus(o);
+    html += `<tr onclick="nav('order-detail',{id:'${o.id}',tab:'overview'})">
+      <td>${esc(o.no)}</td><td>${esc(o.customerName||'-')}</td><td>${esc(o.name)}</td><td>${esc(styleCountLabel(o))}</td>
+      <td>${esc(o.owner||'-')}</td><td><span class="status ${s.cls}">${s.label}</span></td><td>${formatDueDate(o.dueDate)}</td></tr>`;
+  });
+  html += '</tbody></table></div></div>';
+
+  const from1 = totalCount===0?0:startIdx+1; const to1 = Math.min(totalCount, startIdx+pageRows.length);
+  html += `<div class="pagination-bar">
+    <div class="pg-info">顯示 ${from1}–${to1} 筆，共 ${totalCount} 筆</div>
+    <div class="pg-controls">
+      <button class="btn small secondary" ${orderPage<=1?'disabled':''} onclick="goOrderPage(${orderPage-1})">‹ 上一頁</button>
+      ${paginationButtons(totalPages, orderPage).map(p=> p==='...' ? '<span class="pg-ellipsis">…</span>' : `<button class="btn small ${p===orderPage?'':'secondary'}" onclick="goOrderPage(${p})">${p}</button>`).join('')}
+      <button class="btn small secondary" ${orderPage>=totalPages?'disabled':''} onclick="goOrderPage(${orderPage+1})">下一頁 ›</button>
+    </div>
+  </div>`;
   return html;
 }
 function newOrder(){
@@ -723,7 +881,7 @@ function newOrder(){
     {key:'dueDate', label:'案件交期（選填）', type:'date'}
   ], (v)=>{
     const id = 'o'+(seq++);
-    orders.push({id, no:'S'+String(seq).padStart(4,'0'), customerName:v.customerName, name:v.name, owner:v.owner, month:v.month||monthStr(), dueDate:v.dueDate, products:[]});
+    orders.push({id, no:'S'+String(seq).padStart(4,'0'), customerName:v.customerName, name:v.name, owner:v.owner, month:v.month||monthStr(), dueDate:v.dueDate, createdAt:nowISO(), products:[]});
     nav('order-detail',{id, tab:'manage'});
   }, '新增');
 }

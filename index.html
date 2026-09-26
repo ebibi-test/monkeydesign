@@ -162,7 +162,9 @@ tbody tr:last-child td{border-bottom:none;}
   <div class="main">
     <div class="topbar">
       <div class="menu-btn" onclick="openNav()">☰</div>
-      <div><div class="crumb" id="crumb"></div><div class="page-title" id="pageTitle">工作台</div></div>
+      <div style="flex:1;min-width:0"><div class="crumb" id="crumb"></div><div class="page-title" id="pageTitle">工作台</div></div>
+      <div id="syncBadge" style="font-size:11px;color:var(--faint);white-space:nowrap;flex:0 0 auto;">連線中…</div>
+      <button id="authBtn" class="btn small secondary" style="flex:0 0 auto;" onclick="handleAuthClick()">登入同步</button>
     </div>
     <div class="content" id="content"></div>
   </div>
@@ -176,6 +178,9 @@ tbody tr:last-child td{border-bottom:none;}
     <button class="btn" id="modalSubmitBtn" onclick="submitModal()">確定</button>
   </div>
 </div>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore-compat.js"></script>
 <script>
 /* ================= 常數 ================= */
 const KINDS = [
@@ -480,9 +485,77 @@ let errors = [
 ];
 let seq = 100;
 
-/* ================= 本機存檔（localStorage） ================= */
+/* ================= 本機存檔（localStorage，離線快取用）＋ Firebase 雲端同步 ================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyBJK4DzEDN7T7h2-9vlhSl5vjZ730WmPIU",
+  authDomain: "monkey-product-qc.firebaseapp.com",
+  projectId: "monkey-product-qc",
+  storageBucket: "monkey-product-qc.firebasestorage.app",
+  messagingSenderId: "186857382862",
+  appId: "1:186857382862:web:824cf72f21cbaf0d9c419f"
+};
+firebase.initializeApp(firebaseConfig);
+const fbAuth = firebase.auth();
+const fbStore = firebase.firestore();
+let fbUser = null;
+let fbDocRef = null;
+let dbSaveTimer = null;
+
+function setSyncBadge(status){
+  const el = document.getElementById('syncBadge'); if(!el) return;
+  const map = {
+    connecting: ['連線中…','var(--faint)'],
+    synced:     ['☁ 已同步','var(--ok)'],
+    saving:     ['☁ 儲存中…','var(--accent)'],
+    localonly:  ['⚠ 僅本機（未登入）','var(--warn)'],
+    error:      ['⚠ 同步失敗，已存本機','var(--danger)']
+  };
+  const m = map[status]||map.connecting;
+  el.textContent = m[0]; el.style.color = m[1];
+}
+function updateAuthUI(){
+  const btn = document.getElementById('authBtn'); if(!btn) return;
+  btn.textContent = fbUser ? ('登出（'+(fbUser.displayName||fbUser.email||'已登入')+'）') : '登入同步';
+}
+function handleAuthClick(){ fbUser ? fbAuth.signOut() : signInGoogle(); }
+function signInGoogle(){
+  const provider = new firebase.auth.GoogleAuthProvider();
+  fbAuth.signInWithPopup(provider).catch(e=>{ alert('登入失敗：'+e.message); });
+}
+fbAuth.onAuthStateChanged(async (user)=>{
+  fbUser = user; updateAuthUI();
+  if(!user){ fbDocRef = null; setSyncBadge('localonly'); return; }
+  fbDocRef = fbStore.collection('users').doc(user.uid).collection('appstate').doc('main');
+  setSyncBadge('connecting');
+  try{
+    const snap = await fbDocRef.get();
+    if(snap.exists){
+      const data = snap.data();
+      if(data && Array.isArray(data.products) && Array.isArray(data.orders)){
+        products=data.products; packagings=data.packagings||[]; orders=data.orders; errors=data.errors||[]; seq=data.seq||100;
+        fieldHistory=data.fieldHistory||{};
+      }
+    } else {
+      await fbDocRef.set({products, packagings, orders, errors, seq, fieldHistory, updatedAt:new Date().toISOString()});
+    }
+    setSyncBadge('synced');
+    render();
+  }catch(e){ setSyncBadge('error'); }
+});
 function saveState(){
   try{ localStorage.setItem('erp_smart_v2', JSON.stringify({products, packagings, orders, errors, seq, fieldHistory})); }catch(e){}
+  scheduleCloudSave();
+}
+function scheduleCloudSave(){
+  if(!fbDocRef) return;
+  clearTimeout(dbSaveTimer);
+  setSyncBadge('saving');
+  dbSaveTimer = setTimeout(async ()=>{
+    try{
+      await fbDocRef.set({products, packagings, orders, errors, seq, fieldHistory, updatedAt: new Date().toISOString()});
+      setSyncBadge('synced');
+    }catch(e){ setSyncBadge('error'); }
+  }, 700);
 }
 function loadState(){
   try{
@@ -493,6 +566,10 @@ function loadState(){
     fieldHistory = data.fieldHistory || {};
     return true;
   }catch(e){ return false; }
+}
+function initApp(){
+  loadState(); render(); // 先用本機快取立即畫面，避免空白
+  setSyncBadge('localonly'); updateAuthUI(); // 實際狀態由 onAuthStateChanged 接手更新
 }
 function exportData(){
   const b = new Blob([JSON.stringify({products,packagings,orders,errors,seq,fieldHistory})],{type:'application/json'});
@@ -681,7 +758,10 @@ function viewOrderDetail(id, tab){
     html += `<div class="toolbar"><div><button class="btn secondary small" onclick="editOrder('${id}')">編輯案件</button> <button class="btn danger small" onclick="deleteOrder('${id}')">刪除案件</button></div><button class="btn" onclick="newCaseProduct('${id}')">＋ 加入商品</button></div>`;
     if(o.products.length===0) html += '<div class="panel"><div class="empty">尚未加入任何商品，請先加入商品</div></div>';
     o.products.forEach(cp=>{
-      html += `<div class="product-block"><h4>${esc(cp.name)} <button class="btn small secondary" onclick="newStyle('${id}','${cp.id}')">＋ 新增款式</button></h4>`;
+      html += `<div class="product-block"><h4>${esc(cp.name)}
+        <button class="btn small secondary" onclick="editCaseProduct('${id}','${cp.id}')">編輯</button>
+        <button class="btn small secondary" onclick="newStyle('${id}','${cp.id}')">＋ 新增款式</button>
+        <button class="btn danger small" onclick="deleteCaseProduct('${id}','${cp.id}')">刪除</button></h4>`;
       if(cp.styles.length===0) html += '<div class="panel"><div class="empty">尚未新增款式</div></div>';
       else {
         html += '<div class="panel"><div class="tablewrap"><table><thead><tr><th>款式</th><th>數量</th><th>包裝／底卡</th><th>目前進度</th><th>目前等待</th></tr></thead><tbody>';
@@ -711,6 +791,21 @@ function viewOrderDetail(id, tab){
     });
   }
   return html;
+}
+function editCaseProduct(oid,cpid){
+  const o=findOrder(oid); const cp=findCaseProduct(o,cpid); if(!cp) return;
+  openForm('編輯商品項目', [{key:'name', label:'顯示名稱', required:true, value:cp.name}], (v)=>{
+    cp.name = v.name; render();
+  }, '儲存');
+}
+function deleteCaseProduct(oid,cpid){
+  const o=findOrder(oid); const cp=findCaseProduct(o,cpid); if(!cp) return;
+  const msg = cp.styles.length>0
+    ? ('確定刪除「'+cp.name+'」嗎？裡面還有 '+cp.styles.length+' 個款式，會一起刪除，此動作無法復原。')
+    : ('確定刪除「'+cp.name+'」嗎？此動作無法復原。');
+  if(!confirm(msg)) return;
+  o.products = o.products.filter(x=>x.id!==cpid);
+  nav('order-detail',{id:oid, tab:'manage'});
 }
 function newCaseProduct(oid){
   const o = findOrder(oid); if(!o) return;
@@ -853,7 +948,13 @@ function addSpecialNote(oid,cpid,sid){
   const input=document.getElementById('newSpecialInput'); const text=input.value.trim(); if(!text) return;
   getStyle(oid,cpid,sid).specialNotes.push({text}); render();
 }
-function deleteSpecialNote(oid,cpid,sid,idx){ const s=getStyle(oid,cpid,sid); s.specialNotes.splice(idx,1); render(); }
+function editSpecialNote(oid,cpid,sid,idx){
+  const s=getStyle(oid,cpid,sid); const n=s.specialNotes[idx]; if(!n) return;
+  openForm('編輯備註', [{key:'text', label:'備註內容', type:'textarea', required:true, value:n.text}], (v)=>{
+    n.text = v.text; render();
+  }, '儲存');
+}
+function deleteSpecialNote(oid,cpid,sid,idx){ if(!confirm('確定刪除這則備註？')) return; const s=getStyle(oid,cpid,sid); s.specialNotes.splice(idx,1); render(); }
 
 /* ================= 款式詳情 ================= */
 function viewStyleDetail(oid, cpid, sid, tab){
@@ -901,7 +1002,8 @@ function viewStyleDetail(oid, cpid, sid, tab){
       html += `<label class="check-item ${pc.status==='done'?'locked':''}">
         <input type="checkbox" ${it.checked?'checked':''} ${pc.status==='done'?'disabled':''} onchange="togglePackagingItem('${oid}','${cpid}','${sid}',${idx},this.checked)">
         <span>${reqTag(it.required)}${esc(it.text)}</span>
-        ${pc.status!=='done'?`<button type="button" class="btn small secondary" style="margin-left:auto" onclick="event.preventDefault();event.stopPropagation();deletePackagingItem('${oid}','${cpid}','${sid}',${idx})">刪除</button>`:''}</label>`;
+        ${pc.status!=='done'?`<button type="button" class="btn small secondary" style="margin-left:auto" onclick="event.preventDefault();event.stopPropagation();editPackagingItem('${oid}','${cpid}','${sid}',${idx})">編輯</button>
+        <button type="button" class="btn small secondary" onclick="event.preventDefault();event.stopPropagation();deletePackagingItem('${oid}','${cpid}','${sid}',${idx})">刪除</button>`:''}</label>`;
     });
     html += '</div>';
     if(pc.status!=='done'){
@@ -920,7 +1022,9 @@ function viewStyleDetail(oid, cpid, sid, tab){
   } else if(tab==='notes'){
     html += '<div class="panel detail-block">';
     if(s.specialNotes.length===0) html += '<div class="empty">尚未新增備註</div>';
-    s.specialNotes.forEach((n,idx)=> html += `<div class="check-item"><span>${esc(n.text)}</span><button class="btn small secondary" style="margin-left:auto" onclick="deleteSpecialNote('${oid}','${cpid}','${sid}',${idx})">刪除</button></div>`);
+    s.specialNotes.forEach((n,idx)=> html += `<div class="check-item"><span>${esc(n.text)}</span>
+      <button class="btn small secondary" style="margin-left:auto" onclick="editSpecialNote('${oid}','${cpid}','${sid}',${idx})">編輯</button>
+      <button class="btn small secondary" onclick="deleteSpecialNote('${oid}','${cpid}','${sid}',${idx})">刪除</button></div>`);
     html += `</div><div class="inline-add"><input type="text" id="newSpecialInput" placeholder="例如：客戶指定淺藍色，不可使用原本深藍"><button class="btn small" onclick="addSpecialNote('${oid}','${cpid}','${sid}')">新增</button></div>`;
   } else {
     const prog = productProgress(s); const pkg = s.packagingId ? pkgOfId(s.packagingId) : null;
@@ -969,7 +1073,8 @@ function viewRound(oid,cpid,sid,kind,idx){
     html += `<label class="check-item ${r.status==='done'?'locked':''}">
       <input type="checkbox" ${it.checked?'checked':''} ${r.status==='done'?'disabled':''} onchange="toggleRoundItem('${oid}','${cpid}','${sid}','${kind}',${idx},${i},this.checked)">
       <span>${reqTag(it.required)}${esc(it.text)}</span>
-      ${r.status!=='done'?`<button type="button" class="btn small secondary" style="margin-left:auto" onclick="event.preventDefault();event.stopPropagation();deleteRoundItem('${oid}','${cpid}','${sid}','${kind}',${idx},${i})">刪除</button>`:''}</label>`;
+      ${r.status!=='done'?`<button type="button" class="btn small secondary" style="margin-left:auto" onclick="event.preventDefault();event.stopPropagation();editRoundItem('${oid}','${cpid}','${sid}','${kind}',${idx},${i})">編輯</button>
+      <button type="button" class="btn small secondary" onclick="event.preventDefault();event.stopPropagation();deleteRoundItem('${oid}','${cpid}','${sid}','${kind}',${idx},${i})">刪除</button>`:''}</label>`;
   });
   html += '</div>';
   const missing = r.items.filter(i=>i.required&&!i.checked).length;
@@ -984,6 +1089,7 @@ function viewRound(oid,cpid,sid,kind,idx){
       <button class="btn small secondary" onclick="syncRound('${oid}','${cpid}','${sid}','${kind}',${idx})">同步最新固定提醒</button>
       <button class="btn small secondary" onclick="setRoundNote('${oid}','${cpid}','${sid}','${kind}',${idx})">備註</button>
       <button class="btn small secondary" onclick="addRoundError('${oid}','${cpid}','${sid}','${kind}',${idx})">記錄這次發生的問題</button>
+      <button class="btn danger small" onclick="deleteRound('${oid}','${cpid}','${sid}','${kind}',${idx})">刪除這一輪</button>
     </div>
     <div class="lock-bar"><button class="btn small" onclick="lockRound('${oid}','${cpid}','${sid}','${kind}',${idx})">🔒 完成並鎖定這一輪</button></div>`;
   } else {
@@ -992,6 +1098,12 @@ function viewRound(oid,cpid,sid,kind,idx){
   return html;
 }
 function toggleRoundItem(oid,cpid,sid,kind,idx,itemIdx,val){ const s=getStyle(oid,cpid,sid); ensureProduct(s)[kind][idx].items[itemIdx].checked=val; render(); }
+function editRoundItem(oid,cpid,sid,kind,idx,itemIdx){
+  const s=getStyle(oid,cpid,sid); const r=s && ensureProduct(s)[kind][idx]; const it=r && r.items[itemIdx]; if(!it) return;
+  openForm('編輯檢查項目', [
+    {key:'text', label:'檢查內容', required:true, value:it.text}
+  ], (v)=>{ it.text = v.text; render(); }, '儲存');
+}
 function deleteRoundItem(oid,cpid,sid,kind,idx,itemIdx){
   if(!confirm('確定刪除這個檢查項目？')) return;
   const s=getStyle(oid,cpid,sid); const r=s && ensureProduct(s)[kind][idx]; if(!r || r.status==='done') return;
@@ -1044,6 +1156,10 @@ function addRoundError(oid,cpid,sid,kind,idx){
 
 /* ================= 包裝製作檢查 ================= */
 function togglePackagingItem(oid,cpid,sid,idx,val){ const s=getStyle(oid,cpid,sid); s.packagingCheck.items[idx].checked=val; render(); }
+function editPackagingItem(oid,cpid,sid,idx){
+  const s=getStyle(oid,cpid,sid); const it=s && s.packagingCheck && s.packagingCheck.items[idx]; if(!it) return;
+  openForm('編輯注意事項', [{key:'text', label:'內容', required:true, value:it.text}], (v)=>{ it.text = v.text; render(); }, '儲存');
+}
 function deletePackagingItem(oid,cpid,sid,idx){
   if(!confirm('確定刪除這個檢查項目？')) return;
   const s=getStyle(oid,cpid,sid); if(!s || !s.packagingCheck || s.packagingCheck.status==='done') return;
@@ -1093,13 +1209,14 @@ function viewProducts(){
   let html = `<div class="toolbar">
     <input type="text" class="search-input" placeholder="搜尋商品編號／名稱／類型" value="${esc(productSearch)}" oninput="productSearch=this.value;render();keepFocus()">
     <button class="btn" onclick="newProduct()">＋ 新增商品</button></div>
-  <div class="panel"><div class="tablewrap"><table><thead><tr><th>商品編號</th><th>商品名稱</th><th>類型</th><th>固定檢查點</th><th>過去錯誤</th></tr></thead><tbody>`;
+  <div class="panel"><div class="tablewrap"><table><thead><tr><th>商品編號</th><th>商品名稱</th><th>類型</th><th>固定檢查點</th><th>過去錯誤</th><th></th></tr></thead><tbody>`;
   const q = productSearch.trim().toLowerCase();
   const list = q ? products.filter(p=>[p.no,p.name,p.type].some(v=>(v||'').toLowerCase().includes(q))) : products;
-  if(list.length===0) html += '<tr><td colspan="5"><div class="empty">找不到符合的商品</div></td></tr>';
+  if(list.length===0) html += '<tr><td colspan="6"><div class="empty">找不到符合的商品</div></td></tr>';
   list.forEach(p=>{
     html += `<tr onclick="nav('product-detail',{id:'${p.id}',tab:'info'})">
-      <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${esc(p.type||'-')}</td><td>${p.checkpoints.length} 項</td><td>${productErrorCount(p.id)} 筆</td></tr>`;
+      <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${esc(p.type||'-')}</td><td>${p.checkpoints.length} 項</td><td>${productErrorCount(p.id)} 筆</td>
+      <td style="text-align:right"><button type="button" class="btn small secondary" onclick="event.stopPropagation();deleteProduct('${p.id}')">刪除</button></td></tr>`;
   });
   html += '</tbody></table></div></div>'; return html;
 }
@@ -1126,7 +1243,9 @@ function viewProductDetail(id, tab){
       const items = p.checkpoints.filter(c=>c.stage===k.key);
       html += `<div class="section-title">${k.label}</div><div class="panel detail-block">`;
       if(items.length===0) html += '<div class="empty">尚未新增</div>';
-      items.forEach(it=> html += `<div class="check-item">${reqTag(it.required)}<span>${esc(it.text)}</span><button class="btn small secondary" style="margin-left:auto" onclick="deleteProductCheckpoint('${id}','${it.id}')">刪除</button></div>`);
+      items.forEach(it=> html += `<div class="check-item">${reqTag(it.required)}<span>${esc(it.text)}</span>
+        <button class="btn small secondary" style="margin-left:auto" onclick="editProductCheckpoint('${id}','${it.id}')">編輯</button>
+        <button class="btn small secondary" onclick="deleteProductCheckpoint('${id}','${it.id}')">刪除</button></div>`);
       html += '</div>';
     });
     html += `<div class="field-grid two" style="margin-top:14px">
@@ -1159,9 +1278,33 @@ function viewProductDetail(id, tab){
       <div class="detail-row"><div class="k">類型</div><div>${esc(p.type||'-')}</div></div>
       <div class="detail-row"><div class="k">固定檢查點數</div><div>${p.checkpoints.length}</div></div>
       <div class="detail-row"><div class="k">過去錯誤次數</div><div>${productErrorCount(p.id)}</div></div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:10px">
+      <button class="btn small secondary" onclick="editProduct('${id}')">編輯商品資料</button>
+      <button class="btn small secondary" onclick="deleteProduct('${id}')">刪除此商品</button>
     </div>`;
   }
   return html;
+}
+function editProduct(id){
+  const p = products.find(x=>x.id===id); if(!p) return;
+  openForm('編輯商品', [
+    {key:'name', label:'商品名稱', required:true, value:p.name},
+    {key:'type', label:'商品類型（選填）', historyKey:'productType', value:p.type}
+  ], (v)=>{
+    p.name = v.name; p.type = v.type; render();
+  }, '儲存');
+}
+function deleteProduct(id){
+  const p = products.find(x=>x.id===id); if(!p) return;
+  const usedCount = orders.reduce((n,o)=> n + o.products.filter(cp=>cp.productId===id).length, 0);
+  const msg = usedCount>0
+    ? ('確定刪除「'+p.name+'」嗎？目前有 '+usedCount+' 個案件商品使用這個商品，刪除後那些項目會變成「尚未指定商品」，需要重新選擇。')
+    : ('確定刪除「'+p.name+'」嗎？此動作無法復原。');
+  if(!confirm(msg)) return;
+  orders.forEach(o=> o.products.forEach(cp=>{ if(cp.productId===id) cp.productId=null; }));
+  products = products.filter(x=>x.id!==id);
+  nav('products');
 }
 function addProductCheckpointCatalog(pid){
   const text=(document.getElementById('newCpText2').value||'').trim(); if(!text) return;
@@ -1169,6 +1312,13 @@ function addProductCheckpointCatalog(pid){
   const required=document.getElementById('newCpRequired2').checked;
   products.find(p=>p.id===pid).checkpoints.push({id:'c'+(seq++), stage, text, required});
   render();
+}
+function editProductCheckpoint(pid,cid){
+  const p=products.find(x=>x.id===pid); const it=p && p.checkpoints.find(c=>c.id===cid); if(!it) return;
+  openForm('編輯固定檢查點', [
+    {key:'text', label:'檢查內容', required:true, value:it.text},
+    {key:'stage', label:'出現階段', type:'select', options:KINDS.concat([{key:'all',label:'全部階段'}]).map(k=>({value:k.key,label:k.label})), value:it.stage}
+  ], (v)=>{ it.text=v.text; it.stage=v.stage; render(); }, '儲存');
 }
 function deleteProductCheckpoint(pid,cid){ if(!confirm('確定刪除？')) return; const p=products.find(x=>x.id===pid); p.checkpoints=p.checkpoints.filter(c=>c.id!==cid); render(); }
 
@@ -1178,13 +1328,14 @@ function viewPackagings(){
   let html = `<div class="toolbar">
     <input type="text" class="search-input" placeholder="搜尋包裝／底卡名稱" value="${esc(packagingSearch)}" oninput="packagingSearch=this.value;render();keepFocus()">
     <button class="btn" onclick="newPackaging()">＋ 新增包裝／底卡</button></div>
-  <div class="panel"><div class="tablewrap"><table><thead><tr><th>編號</th><th>名稱</th><th>固定檢查點</th><th>過去錯誤</th></tr></thead><tbody>`;
+  <div class="panel"><div class="tablewrap"><table><thead><tr><th>編號</th><th>名稱</th><th>固定檢查點</th><th>過去錯誤</th><th></th></tr></thead><tbody>`;
   const q = packagingSearch.trim().toLowerCase();
   const list = q ? packagings.filter(p=>[p.no,p.name].some(v=>(v||'').toLowerCase().includes(q))) : packagings;
-  if(list.length===0) html += '<tr><td colspan="4"><div class="empty">找不到符合的包裝／底卡</div></td></tr>';
+  if(list.length===0) html += '<tr><td colspan="5"><div class="empty">找不到符合的包裝／底卡</div></td></tr>';
   list.forEach(p=>{
     html += `<tr onclick="nav('packaging-detail',{id:'${p.id}',tab:'info'})">
-      <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${p.checkpoints.length} 項</td><td>${packagingErrorCount(p.id)} 筆</td></tr>`;
+      <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${p.checkpoints.length} 項</td><td>${packagingErrorCount(p.id)} 筆</td>
+      <td style="text-align:right"><button type="button" class="btn small secondary" onclick="event.stopPropagation();deletePackaging('${p.id}')">刪除</button></td></tr>`;
   });
   html += '</tbody></table></div></div>'; return html;
 }
@@ -1205,7 +1356,9 @@ function viewPackagingDetail(id, tab){
   if(tab==='checkpoints'){
     html += '<div class="panel detail-block">';
     if(p.checkpoints.length===0) html += '<div class="empty">尚未新增</div>';
-    p.checkpoints.forEach(it=> html += `<div class="check-item">${reqTag(it.required)}<span>${esc(it.text)}</span><button class="btn small secondary" style="margin-left:auto" onclick="deletePackagingCheckpoint('${id}','${it.id}')">刪除</button></div>`);
+    p.checkpoints.forEach(it=> html += `<div class="check-item">${reqTag(it.required)}<span>${esc(it.text)}</span>
+      <button class="btn small secondary" style="margin-left:auto" onclick="editPackagingCheckpoint('${id}','${it.id}')">編輯</button>
+      <button class="btn small secondary" onclick="deletePackagingCheckpoint('${id}','${it.id}')">刪除</button></div>`);
     html += `</div><div class="field-grid two" style="margin-top:14px">
       <div class="field"><label>新增檢查點</label><input type="text" id="newPkText2" placeholder="例如：確認貼合角度"></div>
     </div><div style="margin-top:10px;display:flex;align-items:center;gap:10px">
@@ -1222,15 +1375,40 @@ function viewPackagingDetail(id, tab){
       <div class="detail-row"><div class="k">名稱</div><div>${esc(p.name)}</div></div>
       <div class="detail-row"><div class="k">固定檢查點數</div><div>${p.checkpoints.length}</div></div>
       <div class="detail-row"><div class="k">過去錯誤次數</div><div>${packagingErrorCount(p.id)}</div></div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:10px">
+      <button class="btn small secondary" onclick="editPackaging('${id}')">編輯名稱</button>
+      <button class="btn small secondary" onclick="deletePackaging('${id}')">刪除此包裝／底卡</button>
     </div>`;
   }
   return html;
+}
+function editPackaging(id){
+  const p = packagings.find(x=>x.id===id); if(!p) return;
+  openForm('編輯包裝／底卡', [{key:'name', label:'包裝／底卡名稱', required:true, value:p.name}], (v)=>{
+    p.name = v.name; render();
+  }, '儲存');
+}
+function deletePackaging(id){
+  const p = packagings.find(x=>x.id===id); if(!p) return;
+  const usedCount = allStyleEntries().filter(e=>e.style.packagingId===id).length;
+  const msg = usedCount>0
+    ? ('確定刪除「'+p.name+'」嗎？目前有 '+usedCount+' 個款式使用這個包裝／底卡，刪除後這些款式會變成「尚未選擇包裝／底卡」，需要重新選擇。')
+    : ('確定刪除「'+p.name+'」嗎？此動作無法復原。');
+  if(!confirm(msg)) return;
+  allStyleEntries().forEach(e=>{ if(e.style.packagingId===id){ e.style.packagingId=null; e.style.packagingCheck=null; } });
+  packagings = packagings.filter(x=>x.id!==id);
+  nav('packagings');
 }
 function addPackagingCheckpointCatalog(pid){
   const text=(document.getElementById('newPkText2').value||'').trim(); if(!text) return;
   const required=document.getElementById('newPkRequired2').checked;
   packagings.find(p=>p.id===pid).checkpoints.push({id:'k'+(seq++), text, required});
   render();
+}
+function editPackagingCheckpoint(pid,cid){
+  const p=packagings.find(x=>x.id===pid); const it=p && p.checkpoints.find(c=>c.id===cid); if(!it) return;
+  openForm('編輯固定檢查點', [{key:'text', label:'檢查內容', required:true, value:it.text}], (v)=>{ it.text=v.text; render(); }, '儲存');
 }
 function deletePackagingCheckpoint(pid,cid){ if(!confirm('確定刪除？')) return; const p=packagings.find(x=>x.id===pid); p.checkpoints=p.checkpoints.filter(c=>c.id!==cid); render(); }
 
@@ -1243,7 +1421,8 @@ function viewErrors(){
     errors.slice().reverse().forEach(e=>{
       const target = e.kind==='product' ? catalogOfId(e.refId) : pkgOfId(e.refId);
       html += `<tr><td>${formatDate(e.date)}</td><td>${e.kind==='product'?'商品':'包裝'}</td><td>${target?esc(target.name):'-'}</td><td>${esc(kindLabel(e.stage||'')||'-')}</td><td>${esc(e.content)}</td><td>${esc(e.fix||'-')}</td>
-        <td><button class="btn small secondary" onclick="event.stopPropagation();deleteErrorEntry('${e.id}')">刪除</button></td></tr>`;
+        <td><button class="btn small secondary" onclick="event.stopPropagation();editErrorEntry('${e.id}')">編輯</button>
+        <button class="btn small secondary" onclick="event.stopPropagation();deleteErrorEntry('${e.id}')">刪除</button></td></tr>`;
     });
     html += '</tbody></table></div></div>';
   }
@@ -1321,6 +1500,13 @@ function newErrorGeneral(){
   });
 }
 function deleteErrorEntry(id){ if(!confirm('確定刪除這筆錯誤紀錄？')) return; errors = errors.filter(e=>e.id!==id); render(); }
+function editErrorEntry(id){
+  const e = errors.find(x=>x.id===id); if(!e) return;
+  openForm('編輯錯誤紀錄', [
+    {key:'content', label:'問題內容', type:'textarea', required:true, value:e.content},
+    {key:'fix', label:'對策', type:'textarea', value:e.fix}
+  ], (v)=>{ e.content=v.content; e.fix=v.fix; render(); }, '儲存');
+}
 
 /* ================= 規劃中頁面 ================= */
 function viewSoon(title){
@@ -1331,8 +1517,7 @@ function viewSoon(title){
   return `<div class="soon-box"><b>${esc(title)}</b> 規劃中，尚未開放<br>${esc(desc[title]||'')}</div>`;
 }
 
-loadState();
-render();
+initApp();
 </script>
 </body>
 </html>

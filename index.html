@@ -695,7 +695,16 @@ function render(){
 
 /* ================= 工作台 ================= */
 let homeMonthFilter = 'all';
+let homeDateRangeType = 'all';
+let homeDateFrom = '';
+let homeDateTo = '';
 function setHomeMonthFilter(v){ homeMonthFilter = v; render(); }
+function setHomeDateRange(v){ homeDateRangeType=v; if(v!=='custom'){ homeDateFrom=''; homeDateTo=''; } render(); }
+function applyHomeDateCustom(){
+  const from = document.getElementById('homeDateFrom').value;
+  const to = document.getElementById('homeDateTo').value;
+  homeDateRangeType='custom'; homeDateFrom=from; homeDateTo=to; render();
+}
 function viewHome(){
   const allEntries = allStyleEntries();
   if(allEntries.length===0) return '<div class="panel"><div class="empty">目前沒有案件，請先到「案件管理」新增</div></div>';
@@ -703,8 +712,23 @@ function viewHome(){
   allEntries.forEach(e=>{ const m = orderMonth(e.order); monthCounts[m] = (monthCounts[m]||0)+1; });
   const months = Object.keys(monthCounts).sort((a,b)=> b.localeCompare(a));
   if(!months.includes(homeMonthFilter)) homeMonthFilter = 'all';
-  const entries = homeMonthFilter==='all' ? allEntries : allEntries.filter(e=> orderMonth(e.order)===homeMonthFilter);
-  let html = monthFilterHtml(months, monthCounts, homeMonthFilter, allEntries.length, 'setHomeMonthFilter');
+  let entries = homeMonthFilter==='all' ? allEntries : allEntries.filter(e=> orderMonth(e.order)===homeMonthFilter);
+  const range = homeDateRangeType==='custom' ? {type:'custom', from:homeDateFrom, to:homeDateTo} : {type:homeDateRangeType};
+  entries = entries.filter(e=> dateRangeMatches(range, createdDateOnly(e.order)));
+  let html = `<div class="filter-bar">
+    <div class="field"><label>日期</label>
+      <select onchange="setHomeDateRange(this.value)">
+        ${ORDER_DATE_OPTIONS.map(o=>`<option value="${o.value}" ${homeDateRangeType===o.value?'selected':''}>${o.label}</option>`).join('')}
+      </select>
+    </div>
+    ${homeDateRangeType==='custom' ? `
+    <div class="field"><label>開始日期</label><input type="date" id="homeDateFrom" value="${esc(homeDateFrom)}"></div>
+    <div class="field"><label>結束日期</label><input type="date" id="homeDateTo" value="${esc(homeDateTo)}"></div>
+    <div class="field" style="min-width:auto"><label style="visibility:hidden">.</label><button class="btn small secondary" onclick="applyHomeDateCustom()">套用</button></div>
+    ` : ''}
+  </div>`;
+  html += `<div style="margin-bottom:8px;font-size:12px;color:var(--faint)">快速篩選（所屬月份）</div>`;
+  html += monthFilterHtml(months, monthCounts, homeMonthFilter, allEntries.length, 'setHomeMonthFilter');
   const risky = entries.map(e=>({...e, warnLine: styleErrorWarnings(e.style, e.cp).join('、')})).filter(x=>x.warnLine);
   const overdue = entries.filter(e=>{ const due=dueOf(e.style,e.order); return due && daysUntilDue(due)<0; });
   const upcoming = entries.filter(e=>{ const due=dueOf(e.style,e.order); if(!due) return false; const days=daysUntilDue(due); return days>=0 && days<=3; });
@@ -722,7 +746,7 @@ function viewHome(){
   sectionsHtml += dashSection('🎨 等待設計', waitDesign);
   sectionsHtml += dashSection('🏭 等待工廠', waitFactory);
   if(others.length) sectionsHtml += dashSection('⏳ 其他等待中', others);
-  if(!sectionsHtml) sectionsHtml = '<div class="panel"><div class="empty">這個月份沒有需要留意的案件</div></div>';
+  if(!sectionsHtml) sectionsHtml = '<div class="panel"><div class="empty">符合目前篩選條件的案件中，沒有需要留意的項目</div></div>';
   return html + sectionsHtml;
 }
 function dashSection(title, list){

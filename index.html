@@ -73,6 +73,7 @@ tbody tr:last-child td{border-bottom:none;}
 .btn.small{padding:6px 11px;font-size:12.5px;}
 .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;flex-wrap:wrap;}
 .search-input{flex:1;min-width:160px;max-width:320px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);}
+.filter-select{padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);}
 .field-grid{display:grid;grid-template-columns:1fr;gap:14px;}
 @media(min-width:520px){.field-grid.two{grid-template-columns:1fr 1fr;}}
 .field label{display:block;font-size:12px;color:var(--sub);margin-bottom:6px;}
@@ -113,6 +114,7 @@ tbody tr:last-child td{border-bottom:none;}
 .err-card summary .cnt{margin-left:auto;background:var(--warn-soft);color:var(--warn);font-size:11px;font-weight:700;border-radius:10px;padding:1px 8px;}
 .err-card .body{padding:0 14px 12px 36px;font-size:12.5px;color:var(--sub);line-height:1.8;}
 .waiting-badge{display:inline-block;padding:3px 9px;border-radius:4px;font-size:11px;font-weight:600;background:var(--accent-soft);color:var(--accent);}
+.group-row td{background:var(--border2);color:var(--sub);font-size:11px;font-weight:700;padding:6px 12px;letter-spacing:.3px;cursor:default;}
 .case-header{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;}
 .case-header .title{font-size:16px;font-weight:700;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 .case-header .meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font-size:12.5px;color:var(--sub);}
@@ -330,6 +332,27 @@ function esc(s){ return (s||'').toString().replace(/[&<>"']/g,m=>({'&':'&amp;','
 function reqTag(required){ return `<span class="tag" style="color:${required?'var(--danger)':'var(--faint)'}">${required?'🔴 必須':'🟡 建議'}</span>`; }
 function catalogOfId(id){ return products.find(p=>p.id===id); }
 function pkgOfId(id){ return packagings.find(p=>p.id===id); }
+/* 分類分組：依 category（分類）欄位分組，保留原本出現順序，未分類統一排最後 */
+function groupByCategoryOrdered(list){
+  const order = []; const map = {};
+  list.forEach(item=>{
+    const cat = (item.category||'').trim() || '未分類';
+    if(!map[cat]){ map[cat]=[]; order.push(cat); }
+    map[cat].push(item);
+  });
+  order.sort((a,b)=>{ if(a==='未分類'&&b!=='未分類') return 1; if(b==='未分類'&&a!=='未分類') return -1; return 0; });
+  return order.map(cat=>({category:cat, items:map[cat]}));
+}
+function categorizedOptionsHtml(list, selectedId){
+  const groups = groupByCategoryOrdered(list);
+  if(groups.length<=1) return list.map(p=>`<option value="${p.id}" ${p.id===selectedId?'selected':''}>${esc(p.name)}</option>`).join('');
+  return groups.map(g=>`<optgroup label="${esc(g.category)}">${g.items.map(p=>`<option value="${p.id}" ${p.id===selectedId?'selected':''}>${esc(p.name)}</option>`).join('')}</optgroup>`).join('');
+}
+function existingCategories(list){
+  const set = new Set();
+  list.forEach(x=>{ const c=(x.category||'').trim(); if(c) set.add(c); });
+  return Array.from(set).sort((a,b)=>a.localeCompare(b,'zh-Hant'));
+}
 function findOrder(oid){ return orders.find(o=>o.id===oid); }
 function findCaseProduct(o,cpid){ return o ? o.products.find(cp=>cp.id===cpid) : null; }
 function findStyle(cp,sid){ return cp ? cp.styles.find(s=>s.id===sid) : null; }
@@ -364,6 +387,14 @@ function mfField(f){
   let inner;
   if(f.type==='select'){
     inner = `<select id="mf_${f.key}">` + f.options.map(o=>`<option value="${esc(o.value)}" ${String(o.value)===String(val)?'selected':''}>${esc(o.label)}</option>`).join('') + `</select>`;
+  } else if(f.type==='pickadd'){
+    const isKnown = f.options.includes(val);
+    inner = `<select id="mf_${f.key}" onchange="document.getElementById('mf_${f.key}_new_wrap').style.display=this.value==='__new__'?'block':'none'">
+      <option value="" ${val===''?'selected':''}>（未分類）</option>
+      ${f.options.map(o=>`<option value="${esc(o)}" ${o===val?'selected':''}>${esc(o)}</option>`).join('')}
+      <option value="__new__" ${!isKnown&&val!==''?'selected':''}>＋ 新增分類...</option>
+    </select>
+    <div id="mf_${f.key}_new_wrap" style="display:${!isKnown&&val!==''?'block':'none'};margin-top:6px"><input type="text" id="mf_${f.key}_new" placeholder="輸入新分類名稱" value="${!isKnown?esc(val):''}"></div>`;
   } else if(f.type==='textarea'){
     inner = `<textarea id="mf_${f.key}" rows="${f.rows||3}" placeholder="${esc(f.placeholder||'')}">${esc(val)}</textarea>`;
   } else {
@@ -380,6 +411,10 @@ function openForm(title, fields, onSubmit, submitLabel){
     for(const f of fields){
       const el = document.getElementById('mf_'+f.key);
       let v = el.value;
+      if(f.type==='pickadd' && v==='__new__'){
+        const newEl = document.getElementById('mf_'+f.key+'_new');
+        v = (newEl && newEl.value || '').trim();
+      }
       if(f.required && !String(v||'').trim()){ alert(f.label+' 為必填'); el.focus(); return; }
       values[f.key] = typeof v==='string' ? v.trim() : v;
     }
@@ -437,13 +472,13 @@ function allErrorsOverviewHTML(){
   products.forEach(p=>{
     const list = productErrors(p.id);
     if(!list.length) return; n++;
-    cards += `<details class="err-card"><summary>● ${esc(p.name)} <span class="tag">商品</span><span class="cnt">${list.length}</span></summary>
+    cards += `<details class="err-card"><summary>● ${esc(p.name)} <span class="tag">商品${p.category?'・'+esc(p.category):''}</span><span class="cnt">${list.length}</span></summary>
       <div class="body">${list.map((e,idx)=>`${String(idx+1).padStart(2,'0')}.${esc(e.content)}`).join('<br>')}</div></details>`;
   });
   packagings.forEach(p=>{
     const list = packagingErrors(p.id);
     if(!list.length) return; n++;
-    cards += `<details class="err-card"><summary>● ${esc(p.name)} <span class="tag">底卡／包裝</span><span class="cnt">${list.length}</span></summary>
+    cards += `<details class="err-card"><summary>● ${esc(p.name)} <span class="tag">底卡／包裝${p.category?'・'+esc(p.category):''}</span><span class="cnt">${list.length}</span></summary>
       <div class="body">${list.map((e,idx)=>`${String(idx+1).padStart(2,'0')}.${esc(e.content)}`).join('<br>')}</div></details>`;
   });
   if(!n) return '';
@@ -1023,7 +1058,7 @@ function deleteCaseProduct(oid,cpid){
 }
 function newCaseProduct(oid){
   const o = findOrder(oid); if(!o) return;
-  const options = products.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  const options = categorizedOptionsHtml(products, null);
   const body = `<div class="field-grid">
     <div class="field"><label>選擇商品</label>
       <select id="mf_pid" onchange="document.getElementById('mf_newname_wrap').style.display=this.value==='__new__'?'block':'none'">
@@ -1051,7 +1086,7 @@ function newCaseProduct(oid){
   });
 }
 function packagingPickerFieldHtml(selectedId){
-  const options = packagings.map(p=>`<option value="${p.id}" ${p.id===selectedId?'selected':''}>${esc(p.name)}</option>`).join('');
+  const options = categorizedOptionsHtml(packagings, selectedId);
   return `<div class="field-grid">
     <div class="field"><label>包裝／底卡</label>
       <select id="mf_pkg" onchange="document.getElementById('mf_pkgnew_wrap').style.display=this.value==='__new__'?'block':'none'">
@@ -1422,28 +1457,44 @@ function addPackagingError(oid,cpid,sid){
 
 /* ================= 商品目錄 ================= */
 let productSearch = '';
+let productCategoryFilter = 'all';
 function viewProducts(){
+  const cats = existingCategories(products);
   let html = `<div class="toolbar">
-    <input type="text" class="search-input" placeholder="搜尋商品編號／名稱／類型" value="${esc(productSearch)}" oninput="productSearch=this.value;render();keepFocus()">
+    <input type="text" class="search-input" placeholder="搜尋商品編號／名稱／類型／分類" value="${esc(productSearch)}" oninput="productSearch=this.value;render();keepFocus()">
+    ${cats.length ? `<select class="filter-select" onchange="productCategoryFilter=this.value;render()">
+      <option value="all" ${productCategoryFilter==='all'?'selected':''}>全部分類</option>
+      ${cats.map(c=>`<option value="${esc(c)}" ${productCategoryFilter===c?'selected':''}>${esc(c)}</option>`).join('')}
+      <option value="__none__" ${productCategoryFilter==='__none__'?'selected':''}>（未分類）</option>
+    </select>` : ''}
     <button class="btn" onclick="newProduct()">＋ 新增商品</button></div>
   <div class="panel"><div class="tablewrap"><table><thead><tr><th>商品編號</th><th>商品名稱</th><th>類型</th><th>固定檢查點</th><th>過去錯誤</th><th></th></tr></thead><tbody>`;
   const q = productSearch.trim().toLowerCase();
-  const list = q ? products.filter(p=>[p.no,p.name,p.type].some(v=>(v||'').toLowerCase().includes(q))) : products;
+  let list = q ? products.filter(p=>[p.no,p.name,p.type,p.category].some(v=>(v||'').toLowerCase().includes(q))) : products;
+  if(productCategoryFilter==='__none__') list = list.filter(p=>!(p.category||'').trim());
+  else if(productCategoryFilter!=='all') list = list.filter(p=>(p.category||'').trim()===productCategoryFilter);
   if(list.length===0) html += '<tr><td colspan="6"><div class="empty">找不到符合的商品</div></td></tr>';
-  list.forEach(p=>{
-    html += `<tr onclick="nav('product-detail',{id:'${p.id}',tab:'info'})">
-      <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${esc(p.type||'-')}</td><td>${p.checkpoints.length} 項</td><td>${productErrorCount(p.id)} 筆</td>
-      <td style="text-align:right"><button type="button" class="btn small secondary" onclick="event.stopPropagation();deleteProduct('${p.id}')">刪除</button></td></tr>`;
-  });
+  else {
+    const groups = groupByCategoryOrdered(list);
+    groups.forEach(g=>{
+      if(groups.length>1) html += `<tr class="group-row"><td colspan="6">${esc(g.category)}</td></tr>`;
+      g.items.forEach(p=>{
+        html += `<tr onclick="nav('product-detail',{id:'${p.id}',tab:'info'})">
+          <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${esc(p.type||'-')}</td><td>${p.checkpoints.length} 項</td><td>${productErrorCount(p.id)} 筆</td>
+          <td style="text-align:right"><button type="button" class="btn small secondary" onclick="event.stopPropagation();deleteProduct('${p.id}')">刪除</button></td></tr>`;
+      });
+    });
+  }
   html += '</tbody></table></div></div>'; return html;
 }
 function newProduct(){
   openForm('新增商品', [
     {key:'name', label:'商品名稱', required:true},
+    {key:'category', label:'分類（選填，用於分組，例如：印刻磁鐵）', type:'pickadd', options:existingCategories(products)},
     {key:'type', label:'商品類型（選填）', historyKey:'productType'}
   ], (v)=>{
     const id = 'p'+(seq++);
-    products.push({id, no:'P'+String(products.length+1).padStart(3,'0'), name:v.name, type:v.type, checkpoints:[]});
+    products.push({id, no:'P'+String(products.length+1).padStart(3,'0'), name:v.name, type:v.type, category:v.category, checkpoints:[]});
     nav('products');
   }, '新增');
 }
@@ -1492,6 +1543,7 @@ function viewProductDetail(id, tab){
     html += `<div class="panel detail-block">
       <div class="detail-row"><div class="k">商品編號</div><div>${esc(p.no)}</div></div>
       <div class="detail-row"><div class="k">商品名稱</div><div>${esc(p.name)}</div></div>
+      <div class="detail-row"><div class="k">分類</div><div>${esc(p.category||'-')}</div></div>
       <div class="detail-row"><div class="k">類型</div><div>${esc(p.type||'-')}</div></div>
       <div class="detail-row"><div class="k">固定檢查點數</div><div>${p.checkpoints.length}</div></div>
       <div class="detail-row"><div class="k">過去錯誤次數</div><div>${productErrorCount(p.id)}</div></div>
@@ -1507,9 +1559,10 @@ function editProduct(id){
   const p = products.find(x=>x.id===id); if(!p) return;
   openForm('編輯商品', [
     {key:'name', label:'商品名稱', required:true, value:p.name},
+    {key:'category', label:'分類（選填，用於分組，例如：印刻磁鐵）', type:'pickadd', options:existingCategories(products), value:p.category},
     {key:'type', label:'商品類型（選填）', historyKey:'productType', value:p.type}
   ], (v)=>{
-    p.name = v.name; p.type = v.type; render();
+    p.name = v.name; p.type = v.type; p.category = v.category; render();
   }, '儲存');
 }
 function deleteProduct(id){
@@ -1541,25 +1594,43 @@ function deleteProductCheckpoint(pid,cid){ if(!confirm('確定刪除？')) retur
 
 /* ================= 包裝／底卡目錄 ================= */
 let packagingSearch = '';
+let packagingCategoryFilter = 'all';
 function viewPackagings(){
+  const cats = existingCategories(packagings);
   let html = `<div class="toolbar">
-    <input type="text" class="search-input" placeholder="搜尋包裝／底卡名稱" value="${esc(packagingSearch)}" oninput="packagingSearch=this.value;render();keepFocus()">
+    <input type="text" class="search-input" placeholder="搜尋包裝／底卡名稱／分類" value="${esc(packagingSearch)}" oninput="packagingSearch=this.value;render();keepFocus()">
+    ${cats.length ? `<select class="filter-select" onchange="packagingCategoryFilter=this.value;render()">
+      <option value="all" ${packagingCategoryFilter==='all'?'selected':''}>全部分類</option>
+      ${cats.map(c=>`<option value="${esc(c)}" ${packagingCategoryFilter===c?'selected':''}>${esc(c)}</option>`).join('')}
+      <option value="__none__" ${packagingCategoryFilter==='__none__'?'selected':''}>（未分類）</option>
+    </select>` : ''}
     <button class="btn" onclick="newPackaging()">＋ 新增包裝／底卡</button></div>
   <div class="panel"><div class="tablewrap"><table><thead><tr><th>編號</th><th>名稱</th><th>固定檢查點</th><th>過去錯誤</th><th></th></tr></thead><tbody>`;
   const q = packagingSearch.trim().toLowerCase();
-  const list = q ? packagings.filter(p=>[p.no,p.name].some(v=>(v||'').toLowerCase().includes(q))) : packagings;
+  let list = q ? packagings.filter(p=>[p.no,p.name,p.category].some(v=>(v||'').toLowerCase().includes(q))) : packagings;
+  if(packagingCategoryFilter==='__none__') list = list.filter(p=>!(p.category||'').trim());
+  else if(packagingCategoryFilter!=='all') list = list.filter(p=>(p.category||'').trim()===packagingCategoryFilter);
   if(list.length===0) html += '<tr><td colspan="5"><div class="empty">找不到符合的包裝／底卡</div></td></tr>';
-  list.forEach(p=>{
-    html += `<tr onclick="nav('packaging-detail',{id:'${p.id}',tab:'info'})">
-      <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${p.checkpoints.length} 項</td><td>${packagingErrorCount(p.id)} 筆</td>
-      <td style="text-align:right"><button type="button" class="btn small secondary" onclick="event.stopPropagation();deletePackaging('${p.id}')">刪除</button></td></tr>`;
-  });
+  else {
+    const groups = groupByCategoryOrdered(list);
+    groups.forEach(g=>{
+      if(groups.length>1) html += `<tr class="group-row"><td colspan="5">${esc(g.category)}</td></tr>`;
+      g.items.forEach(p=>{
+        html += `<tr onclick="nav('packaging-detail',{id:'${p.id}',tab:'info'})">
+          <td>${esc(p.no)}</td><td>${esc(p.name)}</td><td>${p.checkpoints.length} 項</td><td>${packagingErrorCount(p.id)} 筆</td>
+          <td style="text-align:right"><button type="button" class="btn small secondary" onclick="event.stopPropagation();deletePackaging('${p.id}')">刪除</button></td></tr>`;
+      });
+    });
+  }
   html += '</tbody></table></div></div>'; return html;
 }
 function newPackaging(){
-  openForm('新增包裝／底卡', [{key:'name', label:'包裝／底卡名稱', required:true}], (v)=>{
+  openForm('新增包裝／底卡', [
+    {key:'name', label:'包裝／底卡名稱', required:true},
+    {key:'category', label:'分類（選填，用於歸類同一商品的不同包裝，例如：印刻磁鐵）', type:'pickadd', options:existingCategories(packagings)}
+  ], (v)=>{
     const id = 'pk'+(seq++);
-    packagings.push({id, no:'K'+String(packagings.length+1).padStart(3,'0'), name:v.name, checkpoints:[]});
+    packagings.push({id, no:'K'+String(packagings.length+1).padStart(3,'0'), name:v.name, category:v.category, checkpoints:[]});
     nav('packagings');
   }, '新增');
 }
@@ -1590,11 +1661,12 @@ function viewPackagingDetail(id, tab){
     html += `<div class="panel detail-block">
       <div class="detail-row"><div class="k">編號</div><div>${esc(p.no)}</div></div>
       <div class="detail-row"><div class="k">名稱</div><div>${esc(p.name)}</div></div>
+      <div class="detail-row"><div class="k">分類</div><div>${esc(p.category||'-')}</div></div>
       <div class="detail-row"><div class="k">固定檢查點數</div><div>${p.checkpoints.length}</div></div>
       <div class="detail-row"><div class="k">過去錯誤次數</div><div>${packagingErrorCount(p.id)}</div></div>
     </div>
     <div style="margin-top:14px;display:flex;gap:10px">
-      <button class="btn small secondary" onclick="editPackaging('${id}')">編輯名稱</button>
+      <button class="btn small secondary" onclick="editPackaging('${id}')">編輯資料</button>
       <button class="btn small secondary" onclick="deletePackaging('${id}')">刪除此包裝／底卡</button>
     </div>`;
   }
@@ -1602,8 +1674,11 @@ function viewPackagingDetail(id, tab){
 }
 function editPackaging(id){
   const p = packagings.find(x=>x.id===id); if(!p) return;
-  openForm('編輯包裝／底卡', [{key:'name', label:'包裝／底卡名稱', required:true, value:p.name}], (v)=>{
-    p.name = v.name; render();
+  openForm('編輯包裝／底卡', [
+    {key:'name', label:'包裝／底卡名稱', required:true, value:p.name},
+    {key:'category', label:'分類（選填，用於歸類同一商品的不同包裝，例如：印刻磁鐵）', type:'pickadd', options:existingCategories(packagings), value:p.category}
+  ], (v)=>{
+    p.name = v.name; p.category = v.category; render();
   }, '儲存');
 }
 function deletePackaging(id){
